@@ -52,6 +52,29 @@ defmodule Stellar.Horizon.Client.CannedHTTPClient do
   end
 end
 
+defmodule Stellar.Horizon.Client.GzipHTTPClient do
+  @moduledoc false
+
+  alias Stellar.Test.Fixtures.Horizon
+
+  @spec request(
+          method :: atom(),
+          url :: String.t(),
+          headers :: list(),
+          body :: String.t(),
+          options :: list()
+        ) :: {:ok, non_neg_integer(), list(), String.t()}
+  def request(:get, _url, headers, _body, _opts) do
+    send(self(), {:request_headers, headers})
+    {:ok, 200, [{"Content-Encoding", "gzip"}], :zlib.gzip(Horizon.fixture("200"))}
+  end
+
+  def request(:post, _url, headers, _body, _opts) do
+    send(self(), {:request_headers, headers})
+    {:ok, 400, [{"content-encoding", "gzip"}], :zlib.gzip(Horizon.fixture("400_invalid_tx"))}
+  end
+end
+
 defmodule Stellar.Horizon.Client.DefaultTest do
   use ExUnit.Case
 
@@ -118,6 +141,42 @@ defmodule Stellar.Horizon.Client.DefaultTest do
     test "network_error", %{server: server} do
       {:error, %Error{title: "Network error", status_code: :network_error}} =
         Default.request(server, :post, "/network_error")
+    end
+  end
+
+  describe "gzip" do
+    setup do
+      Application.put_env(:stellar_sdk, :http_client, Stellar.Horizon.Client.GzipHTTPClient)
+      %{server: Server.testnet()}
+    end
+
+    test "advertises gzip and decodes a gzipped success response", %{server: server} do
+      {:ok, %{hash: _hash}} = Default.request(server, :get, "/transactions/hash")
+
+      assert_received {:request_headers, headers}
+      assert {"Accept-Encoding", "gzip"} in headers
+    end
+
+    test "decodes a gzipped error response", %{server: server} do
+      {:error, %Error{title: "Transaction Failed", status_code: 400}} =
+        Default.request(server, :post, "/transactions?tx=bad", [{"Content-Type", "text/plain"}])
+
+      assert_received {:request_headers, headers}
+      assert {"Accept-Encoding", "gzip"} in headers
+      assert {"Content-Type", "text/plain"} in headers
+    end
+
+    test "keeps a caller supplied Accept-Encoding", %{server: server} do
+      {:ok, _body} =
+        Default.request(server, :get, "/transactions/hash", [{"accept-encoding", "identity"}])
+
+      assert_received {:request_headers, [{"accept-encoding", "identity"}]}
+    end
+
+    test "leaves plain bodies untouched", %{server: server} do
+      Application.put_env(:stellar_sdk, :http_client, CannedHTTPClient)
+
+      {:ok, %{hash: _hash}} = Default.request(server, :get, "/transactions/hash")
     end
   end
 end

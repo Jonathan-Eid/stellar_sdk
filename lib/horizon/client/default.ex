@@ -22,23 +22,52 @@ defmodule Stellar.Horizon.Client.Default do
     options = http_options(opts)
 
     method
-    |> http_client().request(base_url <> path, headers, body, options)
+    |> http_client().request(base_url <> path, accept_gzip(headers), body, options)
     |> handle_response()
   end
 
   @spec handle_response(response :: client_response()) :: parsed_response()
-  defp handle_response({:ok, status, _headers, body}) when status >= 200 and status <= 299 do
-    decoded_body = json_library().decode!(body, keys: :atoms)
+  defp handle_response({:ok, status, headers, body}) when status >= 200 and status <= 299 do
+    decoded_body = headers |> gunzip(body) |> json_library().decode!(keys: :atoms)
     {:ok, decoded_body}
   end
 
-  defp handle_response({:ok, status, _headers, body}) when status >= 400 and status <= 599 do
-    decoded_body = json_library().decode!(body, keys: :atoms)
+  defp handle_response({:ok, status, headers, body}) when status >= 400 and status <= 599 do
+    decoded_body = headers |> gunzip(body) |> json_library().decode!(keys: :atoms)
     ErrorMapper.build({:horizon, decoded_body})
   end
 
   defp handle_response({:error, reason}) do
     ErrorMapper.build({:network, reason})
+  end
+
+  @spec accept_gzip(headers :: list()) :: list()
+  defp accept_gzip(headers) do
+    if has_header?(headers, "accept-encoding"),
+      do: headers,
+      else: [{"Accept-Encoding", "gzip"} | headers]
+  end
+
+  # Hackney does not decompress, so the body is inflated here when Horizon gzipped it.
+  @spec gunzip(headers :: list(), body :: binary()) :: binary()
+  defp gunzip(headers, body) do
+    case body do
+      <<0x1F, 0x8B, _rest::binary>> -> if gzipped?(headers), do: :zlib.gunzip(body), else: body
+      _ -> body
+    end
+  end
+
+  @spec gzipped?(headers :: list()) :: boolean()
+  defp gzipped?(headers) do
+    Enum.any?(headers, fn {name, value} ->
+      String.downcase(to_string(name)) == "content-encoding" and
+        String.downcase(to_string(value)) == "gzip"
+    end)
+  end
+
+  @spec has_header?(headers :: list(), name :: binary()) :: boolean()
+  defp has_header?(headers, name) do
+    Enum.any?(headers, fn {key, _value} -> String.downcase(to_string(key)) == name end)
   end
 
   @spec http_client() :: atom()
